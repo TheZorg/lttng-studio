@@ -7,16 +7,21 @@
 *.la
 *.lai
 *.so
+*.so.*
 *.dll
 *.dylib
 
 # Qt-es
 
+/.qmake.cache
+/.qmake.stash
 *.pro.user
 *.pro.user.*
+*.moc
 moc_*.cpp
 qrc_*.cpp
-Makefile
+ui_*.h
+Makefile*
 *-build-*
 
 # private config
