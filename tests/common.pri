@@ -16,7 +16,7 @@ else:unix: LIBS += -L$${top_builddir}/lib/lttngstudio/ -llttngstudio
 #unix: CONFIG += link_pkgconfig
 #unix: PKGCONFIG += babeltrace
 
-LIBS += -L/usr/lib/x86_64-linux-gnu -lunwind -lunwind-x86_64 -lbabeltrace -lbabeltrace-ctf
+LIBS += /home/fabien/git/babeltrace/formats/ctf/.libs/libbabeltrace-ctf.a /home/fabien/git/babeltrace/lib/.libs/libbabeltrace.a -L/usr/lib/x86_64-linux-gnu -lunwind -lunwind-x86_64 -lglib-2.0 -luuid -ltbb
 
 INCLUDEPATH += $$PWD/../lib/lttngstudio
 DEPENDPATH += $$PWD/../lib/lttngstudio
