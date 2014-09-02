@@ -35,8 +35,12 @@ private Q_SLOTS:
     void cleanupTestCase();
     void benchmarkSerial();
     void benchmarkParallel();
+    void benchmarkParallelPerStream();
+    void benchmarkTbb();
 private:
     QDir traceDir;
+    QDir perStreamTraceDir;
+
 private:
     int countSerial();
     int countParallel();
@@ -44,6 +48,7 @@ private:
     int countParallelMapReduce();
     int countParallelMapReduceBalanced();
     int countParallelTbb(uint64_t minChunk);
+    int countParallelPerStream();
 };
 
 struct map_params {
@@ -66,8 +71,9 @@ void ParallelTest::initTestCase()
 //                                     << "babeltrace" << "tests" << "ctf-traces"
 //                                     << "succeed" << "lttng-modules-2.0-pre5";
     QStringList path = QStringList() << "/home" << "fabien" << "lttng-traces"
-                                        << "live-test-20140805-153033" << "kernel";
-    traceDir.setPath(path.join(QDir::separator()));
+                                        << "sinoscope-20140708-150630";
+    traceDir.setPath(path.join(QDir::separator()) + "/kernel");
+    perStreamTraceDir.setPath(path.join(QDir::separator()) + "/kernel_per_stream");
 }
 
 void ParallelTest::cleanupTestCase()
@@ -76,7 +82,7 @@ void ParallelTest::cleanupTestCase()
 
 void ParallelTest::benchmarkSerial()
 {
-    return;
+//    return;
     volatile int count;
     QTime timer;
     timer.start();
@@ -91,8 +97,32 @@ void ParallelTest::benchmarkParallel()
 //    return;
     volatile int count;
     QTime timer;
-    uint64_t minChunks[] = { 1000000000, /*2000000000, 4000000000, 8000000000*/ };
-    for (int i = 0; i < sizeof(minChunks)/sizeof(uint64_t); i++) {
+    timer.start();
+    count = countParallelMapReduce();
+    int milliseconds = timer.elapsed();
+    qDebug() << "Event count : " << count;
+    qDebug() << "Elapsed : " << milliseconds << "ms";
+}
+
+void ParallelTest::benchmarkParallelPerStream()
+{
+//    return;
+    volatile int count;
+    QTime timer;
+    timer.start();
+    count = countParallelPerStream();
+    int milliseconds = timer.elapsed();
+    qDebug() << "Event count : " << count;
+    qDebug() << "Elapsed : " << milliseconds << "ms";
+}
+
+void ParallelTest::benchmarkTbb()
+{
+//    return;
+    volatile int count;
+    QTime timer;
+    uint64_t minChunks[] = { /*1000000000, 2000000000, 4000000000,*/ 8000000000 };
+    for (size_t i = 0; i < sizeof(minChunks)/sizeof(uint64_t); i++) {
         timer.restart();
         count = countParallelTbb(minChunks[i]);
         int milliseconds = timer.elapsed();
@@ -111,9 +141,6 @@ int ParallelTest::countSerial()
 {
     QTime timer;
     timer.start();
-    struct bt_ctf_iter *iter;
-    struct bt_iter_pos begin_pos;
-    struct bt_ctf_event *ctf_event;
     int count = 0;
 
     QString path = traceDir.absolutePath();
@@ -292,10 +319,9 @@ int ParallelTest::countParallelMapReduce()
 {
 //    QTime timer;
 //    timer.start();
-    struct bt_context *ctxs[NUM_THREADS];
     struct bt_iter_pos positions[NUM_THREADS+1];
     QList< struct map_params > paramsList;
-    struct bt_iter_pos begin_pos, end_pos;
+    struct bt_iter_pos end_pos;
 
     QString path = traceDir.absolutePath();
 
@@ -308,7 +334,6 @@ int ParallelTest::countParallelMapReduce()
         return 0;
     }
 
-    begin_pos.type = BT_SEEK_BEGIN;
     end_pos.type = BT_SEEK_LAST;
 
     // Get begin timestamp
@@ -446,10 +471,7 @@ int ParallelTest::countParallelTbb(uint64_t minChunk)
 {
     //    QTime timer;
     //    timer.start();
-        struct bt_context *ctxs[NUM_THREADS];
-        struct bt_iter_pos positions[NUM_THREADS+1];
-        QList< struct map_params > paramsList;
-        struct bt_iter_pos begin_pos, end_pos;
+        struct bt_iter_pos end_pos;
 
         QString path = traceDir.absolutePath();
 
@@ -462,7 +484,6 @@ int ParallelTest::countParallelTbb(uint64_t minChunk)
             return 0;
         }
 
-        begin_pos.type = BT_SEEK_BEGIN;
         end_pos.type = BT_SEEK_LAST;
 
         // Get begin timestamp
@@ -491,6 +512,41 @@ int ParallelTest::countParallelTbb(uint64_t minChunk)
 
         int count = ec.mySum;
 
+        return count;
+}
+
+int ParallelTest::countParallelPerStream()
+{
+    //    QTime timer;
+    //    timer.start();
+        QList< struct map_params > paramsList;
+
+        QString path = perStreamTraceDir.absolutePath();
+
+        for (int i = 0; i < NUM_THREADS; i++)
+        {
+            struct map_params params;
+            params.tracePath = path + "/channel0_" + QString::number(i) + ".d";
+            params.begin_pos.type = BT_SEEK_BEGIN;
+            params.end_pos.type = BT_SEEK_LAST;
+            paramsList << params;
+        }
+
+    //    int milliseconds = timer.elapsed();
+    //    qDebug() << "Elapsed for init : " << milliseconds << "ms";
+    //    timer.restart();
+
+        QFuture<int> countFuture = QtConcurrent::mappedReduced(paramsList, doCount, doSum);
+
+        int count = countFuture.result();
+
+    //    milliseconds = timer.elapsed();
+    //    qDebug() << "Elapsed for map reduce : " << milliseconds << "ms";
+
+    //    for (int i = 0; i < NUM_THREADS; i++)
+    //    {
+    //        bt_context_put(ctxs[i]);
+    //    }
         return count;
 }
 
