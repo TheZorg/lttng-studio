@@ -3,4 +3,5 @@ SUBDIRS = \
 basic \
     babeltrace \
     unwind \
-    parallel
+    parallel \
+    parallel-cpu
