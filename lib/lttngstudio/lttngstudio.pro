@@ -10,6 +10,7 @@ TARGET = lttngstudio
 TEMPLATE = lib
 
 include(unwind/unwind.pri)
+include(lttng-analyzes/lttng-analyzes.pri)
 
 isEmpty(PREFIX) {
     PREFIX = /usr/local
@@ -23,4 +24,3 @@ unix:!symbian {
     }
     INSTALLS += target
 }
-

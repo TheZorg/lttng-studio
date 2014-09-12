@@ -10,8 +10,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cstdio>
-
-#include <stdint.h>
+#include <cstdint>
 
 #include <babeltrace/babeltrace.h>
 #include <babeltrace/format.h>
@@ -23,27 +22,12 @@
 
 #include <glib.h>
 
+#include "lttng-analyzes/common.h"
+#include "lttng-analyzes/sched.h"
+
 using namespace std;
 
-struct Process
-{
-    int pid;
-    int tid;
-    uint64_t cpu_ns;
-    char *comm;
-    uint64_t last_sched;
-    Process() : pid(-1), tid(-1), cpu_ns(0), comm(NULL), last_sched(0) {}
-};
-
-struct Cpu
-{
-    unsigned int id;
-    uint64_t task_start;
-    int current_tid;
-    uint64_t cpu_ns;
-    double cpu_pc;
-    Cpu() : id(0), task_start(0), current_tid(-1), cpu_ns(0), cpu_pc(0.0) {}
-};
+int NUM_THREADS = 8;
 
 class ParallelCpuTest : public QObject
 {
@@ -51,127 +35,37 @@ class ParallelCpuTest : public QObject
 
 public:
     ParallelCpuTest();
-    enum bt_cb_ret handleSchedSwitch(bt_ctf_event *call_data, void *privateData);
 
 private Q_SLOTS:
     void initTestCase();
     void benchmarkSerialCpu();
-//    void benchmarkParallelCpu();
+    void benchmarkParallelCpu();
 private:
     QDir traceDir;
     QDir perStreamTraceDir;
-    QHash<int, Process> tids;
-    QVector<Cpu> cpus;
-    uint64_t start;
-    uint64_t end;
-
-    void update_cputop_data(uint64_t timestamp, int64_t cpu, int prev_pid,
-            int next_pid, char *prev_comm, char *next_comm, char *hostname);
-
-    Cpu& getCpu(unsigned int cpu);
-    static uint64_t get_cpu_id(const struct bt_ctf_event *event);
+    Sched sched;
 };
 
-ParallelCpuTest *gTest;
+struct map_params {
+    QString tracePath;
+    struct bt_iter_pos begin_pos;
+    struct bt_iter_pos end_pos;
+};
 
-ParallelCpuTest::ParallelCpuTest() : start(0), end(0)
+
+ParallelCpuTest::ParallelCpuTest() : sched()
 {
-    gTest = this;
 }
 
 void ParallelCpuTest::initTestCase()
 {
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-//    QStringList path = QStringList() << env.value("top_srcdir") << "3rdparty"
-//                                     << "babeltrace" << "tests" << "ctf-traces"
-//                                     << "succeed" << "lttng-modules-2.0-pre5";
     QStringList path = QStringList() << "/home" << "fabien" << "lttng-traces"
                                         << "sinoscope-20140708-150630";
     traceDir.setPath(path.join(QDir::separator()) + "/kernel");
     perStreamTraceDir.setPath(path.join(QDir::separator()) + "/kernel_per_stream");
 }
 
-uint64_t ParallelCpuTest::get_cpu_id(const struct bt_ctf_event *event)
-{
-    const struct bt_definition *scope;
-    uint64_t cpu_id;
-
-    scope = bt_ctf_get_top_level_scope(event, BT_STREAM_PACKET_CONTEXT);
-    cpu_id = bt_ctf_get_uint64(bt_ctf_get_field(event, scope, "cpu_id"));
-    if (bt_ctf_field_get_error()) {
-        fprintf(stderr, "[error] get cpu_id\n");
-        return -1ULL;
-    }
-
-    return cpu_id;
-}
-
-Cpu& ParallelCpuTest::getCpu(unsigned int cpu)
-{
-    QMutableVectorIterator<Cpu> iter(cpus);
-    while (iter.hasNext()) {
-        Cpu &tmp = iter.next();
-        if (tmp.id == cpu) {
-            return tmp;
-        }
-    }
-    Cpu newCpu;
-    newCpu.id = cpu;
-    newCpu.current_tid = -1;
-    newCpu.task_start = 0;
-    cpus.append(newCpu);
-    return cpus.last();
-}
-
-void ParallelCpuTest::update_cputop_data(uint64_t timestamp, int64_t cpu, int prev_pid,
-        int next_pid, char *prev_comm, char *next_comm, char *hostname)
-{
-    if (start == 0) {
-        start = timestamp;
-    }
-    end = timestamp;
-
-    Cpu &c = getCpu(cpu);
-    if (c.task_start != 0) {
-        c.cpu_ns += timestamp - c.task_start;
-    }
-
-    if (next_pid != 0) {
-        c.task_start = timestamp;
-        c.current_tid = next_pid;
-    } else {
-        c.task_start = 0;
-        c.current_tid = -1;
-    }
-
-    if (tids.contains(prev_pid)) {
-        Process &p = tids[prev_pid];
-        p.cpu_ns += (timestamp - p.last_sched);
-    }
-
-    if (next_pid == 0) {
-        return;
-    }
-
-    if (!tids.contains(next_pid)) {
-        Process p;
-        p.tid = next_pid;
-        p.comm = next_comm;
-        tids[next_pid] = p;
-    } else {
-        Process &p = tids[next_pid];
-        p.comm = next_comm;
-    }
-
-}
-
 enum bt_cb_ret handleSchedSwitchWrapper(bt_ctf_event *event, void *privateData)
-{
-    ParallelCpuTest *test = gTest;
-    return test->handleSchedSwitch(event, privateData);
-}
-
-enum bt_cb_ret ParallelCpuTest::handleSchedSwitch(bt_ctf_event *call_data, void *privateData)
 {
     const struct bt_definition *scope;
     uint64_t timestamp;
@@ -179,45 +73,45 @@ enum bt_cb_ret ParallelCpuTest::handleSchedSwitch(bt_ctf_event *call_data, void 
     char *prev_comm, *next_comm;
     int prev_tid, next_tid;
     char *hostname;
+    Sched *sched = (Sched*)privateData;
 
-    timestamp = bt_ctf_get_timestamp(call_data);
+    timestamp = bt_ctf_get_timestamp(event);
     if (timestamp == -1ULL)
         goto error;
 
-    scope = bt_ctf_get_top_level_scope(call_data,
+    scope = bt_ctf_get_top_level_scope(event,
             BT_EVENT_FIELDS);
-    prev_comm = bt_ctf_get_char_array(bt_ctf_get_field(call_data,
+    prev_comm = bt_ctf_get_char_array(bt_ctf_get_field(event,
                 scope, "_prev_comm"));
     if (bt_ctf_field_get_error()) {
         fprintf(stderr, "Missing prev_comm context info\n");
         goto error;
     }
 
-    next_comm = bt_ctf_get_char_array(bt_ctf_get_field(call_data,
+    next_comm = bt_ctf_get_char_array(bt_ctf_get_field(event,
                 scope, "_next_comm"));
     if (bt_ctf_field_get_error()) {
         fprintf(stderr, "Missing next_comm context info\n");
         goto error;
     }
 
-    prev_tid = bt_ctf_get_int64(bt_ctf_get_field(call_data,
+    prev_tid = bt_ctf_get_int64(bt_ctf_get_field(event,
                 scope, "_prev_tid"));
     if (bt_ctf_field_get_error()) {
         fprintf(stderr, "Missing prev_tid context info\n");
         goto error;
     }
 
-    next_tid = bt_ctf_get_int64(bt_ctf_get_field(call_data,
+    next_tid = bt_ctf_get_int64(bt_ctf_get_field(event,
                 scope, "_next_tid"));
     if (bt_ctf_field_get_error()) {
         fprintf(stderr, "Missing next_tid context info\n");
         goto error;
     }
 
-    cpu_id = get_cpu_id(call_data);
+    cpu_id = get_cpu_id(event);
 
-    update_cputop_data(timestamp, cpu_id, prev_tid, next_tid,
-            prev_comm, next_comm, hostname);
+    sched->doSwitch(timestamp, cpu_id, prev_tid, next_tid, prev_comm, next_comm, hostname);
 
     return BT_CB_OK;
 
@@ -227,6 +121,9 @@ error:
 
 void ParallelCpuTest::benchmarkSerialCpu()
 {
+    return;
+    QTime timer;
+    timer.start();
     struct bt_context *ctx;
     struct bt_ctf_iter *iter;
     struct bt_ctf_event *ctf_event;
@@ -246,7 +143,7 @@ void ParallelCpuTest::benchmarkSerialCpu()
     iter = bt_ctf_iter_create(ctx, NULL, NULL);
     bt_ctf_iter_add_callback(iter,
                              g_quark_from_static_string("sched_switch"),
-                             NULL, 0, handleSchedSwitchWrapper, NULL, NULL, NULL);
+                             &this->sched, 0, handleSchedSwitchWrapper, NULL, NULL, NULL);
 
     while((ctf_event = bt_ctf_iter_read_event(iter))) {
         err = bt_iter_next(bt_ctf_get_iter(iter));
@@ -255,6 +152,11 @@ void ParallelCpuTest::benchmarkSerialCpu()
             break;
         }
     }
+
+    QVector<Cpu>& cpus = sched.getCpus();
+    QHash<int, Process>& tids = sched.getTids();
+    uint64_t start = sched.getStart();
+    uint64_t end = sched.getEnd();
 
     QMutableVectorIterator<Cpu> cpu_iter(cpus);
     while (cpu_iter.hasNext()) {
@@ -282,6 +184,146 @@ void ParallelCpuTest::benchmarkSerialCpu()
 
     bt_ctf_iter_destroy(iter);
     bt_context_put(ctx);
+    int elapsed = timer.elapsed();
+    qDebug() << "Elapsed for serial : " << elapsed << "ms.";
+}
+
+Sched doCount(const map_params &params);
+void doReduce(Sched &final, const Sched& intermediate);
+
+void ParallelCpuTest::benchmarkParallelCpu()
+{
+        QTime timer;
+        timer.start();
+        QList< struct map_params > paramsList;
+
+        QString path = perStreamTraceDir.absolutePath();
+
+        for (int i = 0; i < NUM_THREADS; i++)
+        {
+            struct map_params params;
+            params.tracePath = path + "/channel0_" + QString::number(i) + ".d";
+            params.begin_pos.type = BT_SEEK_BEGIN;
+            params.end_pos.type = BT_SEEK_LAST;
+            paramsList << params;
+        }
+
+        QFuture<Sched> schedFuture = QtConcurrent::mappedReduced(paramsList, doCount, doReduce);
+
+        Sched sched = schedFuture.result();
+
+        QVector<Cpu>& cpus = sched.getCpus();
+        QHash<int, Process>& tids = sched.getTids();
+
+        sort(cpus.begin(), cpus.end(), [](const Cpu &a, const Cpu &b) -> bool {
+            return a.cpu_ns > b.cpu_ns;
+        });
+
+        QVectorIterator<Cpu> sorted(cpus);
+        while(sorted.hasNext()) {
+            const Cpu &cpu = sorted.next();
+            uint64_t total = sched.getEnd() - sched.getStart();
+            double cpu_pc = ((double)(cpu.cpu_ns * 100))/((double)total);
+            printf("CPU %d: %0.02f%%\n", cpu.id, cpu_pc);
+        }
+        int elapsed = timer.elapsed();
+        qDebug() << "Elapsed for parallel : " << elapsed << "ms.";
+}
+
+Sched doCount(const map_params &params)
+{
+    struct bt_context *ctx;
+    struct bt_ctf_iter *iter;
+    struct bt_ctf_event *ctf_event;
+    int trace_id;
+    int err;
+    Sched sched;
+
+    QString path = params.tracePath;
+    ctx = bt_context_create();
+    trace_id = bt_context_add_trace(ctx, path.toStdString().c_str(), "ctf", NULL, NULL, NULL);
+    if(trace_id < 0)
+    {
+        qDebug() << "Failed: bt_context_add_trace";
+        return sched;
+    }
+
+    iter = bt_ctf_iter_create(ctx, NULL, NULL);
+    bt_ctf_iter_add_callback(iter,
+                             g_quark_from_static_string("sched_switch"),
+                             &sched, 0, handleSchedSwitchWrapper, NULL, NULL, NULL);
+
+    while((ctf_event = bt_ctf_iter_read_event(iter))) {
+        err = bt_iter_next(bt_ctf_get_iter(iter));
+        if (err) {
+            qDebug() << "Error occured while iterating";
+            break;
+        }
+    }
+
+    QVector<Cpu>& cpus = sched.getCpus();
+    QHash<int, Process>& tids = sched.getTids();
+    uint64_t start = sched.getStart();
+    uint64_t end = sched.getEnd();
+
+    QMutableVectorIterator<Cpu> cpu_iter(cpus);
+    while (cpu_iter.hasNext()) {
+        Cpu &cpu = cpu_iter.next();
+        uint64_t total = end - start;
+        if (cpu.task_start != 0) {
+            cpu.cpu_ns += end - cpu.task_start;
+        }
+        if (cpu.current_tid >= 0) {
+            tids[cpu.current_tid].cpu_ns += end - cpu.task_start;
+        }
+    }
+
+    sort(cpus.begin(), cpus.end(), [](const Cpu &a, const Cpu &b) -> bool {
+        return a.id > b.id;
+    });
+
+    bt_ctf_iter_destroy(iter);
+    bt_context_put(ctx);
+
+    return sched;
+}
+
+void doReduce(Sched &final, const Sched& intermediate)
+{
+    const QVector<Cpu> &partCpus = intermediate.getCpus();
+    const QHash<int, Process> &partTids = intermediate.getTids();
+    QVector<Cpu> &totalCpus = final.getCpus();
+    QHash<int, Process> &totalTids = final.getTids();
+
+    // Fix start/end times
+    if (intermediate.getStart() < final.getStart() || final.getStart() == 0) {
+        final.setStart(intermediate.getStart());
+    }
+    if (intermediate.getEnd() > final.getEnd()) {
+        final.setEnd(intermediate.getEnd());
+    }
+
+    // Merge cpus (assumes sorted)
+    QVectorIterator<Cpu> partCpuIter(partCpus);
+    QMutableVectorIterator<Cpu> totalCpuIter(totalCpus);
+    while(partCpuIter.hasNext()) {
+        const Cpu &partCpu = partCpuIter.next();
+        bool found = false;
+        while (totalCpuIter.hasNext()) {
+            Cpu &totalCpu = totalCpuIter.peekNext();
+            if (totalCpu.id == partCpu.id) {
+                found = true;
+                totalCpu.cpu_ns += partCpu.cpu_ns;
+            }
+            if (totalCpu.id >= partCpu.id) {
+                break;
+            }
+            totalCpuIter.next();
+        }
+        if (!found) {
+            totalCpuIter.insert(partCpu);
+        }
+    }
 }
 
 QTEST_APPLESS_MAIN(ParallelCpuTest)
