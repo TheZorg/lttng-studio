@@ -18,6 +18,8 @@ else:unix: LIBS += -L$${top_builddir}/lib/lttngstudio/ -llttngstudio
 
 LIBS += /home/fabien/git/babeltrace/formats/ctf/.libs/libbabeltrace-ctf.a /home/fabien/git/babeltrace/lib/.libs/libbabeltrace.a -L/usr/lib/x86_64-linux-gnu -lunwind -lunwind-x86_64 -lglib-2.0 -luuid -ltbb
 
-INCLUDEPATH += $$PWD/../lib/lttngstudio
+INCLUDEPATH += $$PWD/../lib/lttngstudio /home/fabien/git/babeltrace/include /usr/include/glib-2.0/ /usr/lib/x86_64-linux-gnu/glib-2.0/include/
 DEPENDPATH += $$PWD/../lib/lttngstudio
 
+
+QMAKE_CXXFLAGS += -fpermissive

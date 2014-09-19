@@ -38,10 +38,12 @@ void Sched::doSwitch(uint64_t timestamp, int64_t cpu, int prev_pid, int next_pid
         Process p;
         p.tid = next_pid;
         p.comm = next_comm;
+        p.last_sched = timestamp;
         tids[next_pid] = p;
     } else {
         Process &p = tids[next_pid];
         p.comm = next_comm;
+        p.last_sched = timestamp;
     }
 }
 

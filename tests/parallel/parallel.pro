@@ -23,6 +23,8 @@ DEFINES += SRCDIR=\\\"$$PWD/\\\"
 
 #LIBS += -ltbb
 
-CONFIG += c++11
+#CONFIG += c++11
+
+QMAKE_CXXFLAGS += -std=gnu++0x
 
 include(../post.pri)

@@ -18,10 +18,16 @@
 #include <babeltrace/iterator.h>
 #include <babeltrace/ctf/events.h>
 #include <babeltrace/ctf/iterator.h>
+extern "C" {
+#include "babeltrace/ctf/types.h"
+}
 
 using namespace std;
 
 int NUM_THREADS = 8;
+
+uint64_t PACKET_SIZE = 67108864 / 2;
+uint64_t MAX_PACKET_SIZE = PACKET_SIZE;
 
 class ParallelTest : public QObject
 {
@@ -45,7 +51,7 @@ private:
     int countSerial();
     int countParallel();
     int countParallelMulti();
-    int countParallelMapReduce();
+    int countParallelMapReduce(int splits);
     int countParallelMapReduceBalanced();
     int countParallelTbb(uint64_t minChunk);
     int countParallelPerStream();
@@ -57,8 +63,118 @@ struct map_params {
     struct bt_iter_pos end_pos;
 };
 
+void seek(bt_stream_pos *pos, size_t index, int whence);
 int doCount(struct map_params params);
 void doSum(int &finalResult, const int &intermediate);
+
+struct TimestampRange {
+    uint64_t begin;
+    uint64_t end;
+    uint64_t minChunk;
+    bool empty() const { return begin == end; }
+    bool is_divisible() const { return (end - begin) > minChunk; }
+    TimestampRange(uint64_t begin, uint64_t end, uint64_t minChunk) :
+        begin(begin), end(end), minChunk(minChunk) {}
+    TimestampRange(TimestampRange &r, tbb::split) : minChunk(r.minChunk) {
+        uint64_t m = (r.begin + r.end)/2;
+        this->begin = m;
+        this->end = r.end;
+        r.end = m;
+    }
+};
+
+struct TraceWrapper {
+    bt_context *ctx;
+    TraceWrapper(QString tracePath) {
+//        qDebug() << "Making wrapper";
+        ctx = bt_context_create();
+        int trace_id = bt_context_add_trace(ctx, tracePath.toStdString().c_str(), "ctf", NULL, NULL, NULL);
+        if(trace_id < 0)
+        {
+            qDebug() << "Failed: bt_context_add_trace";
+        }
+    }
+
+    TraceWrapper(TraceWrapper &other) : ctx(other.ctx) {
+//        qDebug() << "Copying wrapper";
+        bt_context_get(ctx);
+    }
+
+    TraceWrapper(TraceWrapper &&other) : ctx(std::move(other.ctx)) {
+//        qDebug() << "Moving wrapper";
+    }
+
+    ~TraceWrapper() {
+//        qDebug() << "Destroying wrapper";
+        bt_context_put(ctx);
+    }
+};
+
+struct EventCount {
+    int mySum;
+    tbb::enumerable_thread_specific<TraceWrapper> &myTLS; // Thread local storage
+    QString myTracePath;
+    EventCount(tbb::enumerable_thread_specific<TraceWrapper> &tls) : mySum(0), myTLS(tls) {}
+    EventCount(EventCount &other, tbb::split) : EventCount(other.myTLS) { }
+    void operator()(const tbb::blocked_range<uint64_t> &r) {
+        uint64_t begin = r.begin();
+        uint64_t end = r.end();
+//        qDebug() << "Calculating range between " << begin << " and " << end;
+        TraceWrapper &wrapper = myTLS.local();
+        bt_context *myCtx = wrapper.ctx;
+        int sum = mySum;
+        bt_iter_pos begin_pos, end_pos;
+        bt_ctf_event *ctf_event;
+
+        begin_pos.type = end_pos.type = BT_SEEK_TIME;
+        begin_pos.u.seek_time = begin;
+        end_pos.u.seek_time = end;
+
+        struct bt_ctf_iter *iter = bt_ctf_iter_create(myCtx, &begin_pos, &end_pos);
+
+        while((ctf_event = bt_ctf_iter_read_event(iter))) {
+            sum++;
+            bt_iter_next(bt_ctf_get_iter(iter));
+        }
+
+        bt_ctf_iter_destroy(iter);
+
+        mySum = sum;
+    }
+    void join (const EventCount &other) { mySum += other.mySum; }
+};
+
+struct EventCountAlt
+{
+    typedef int result_type;
+    tbb::enumerable_thread_specific<TraceWrapper> &myTLS; // Thread local storage
+
+    EventCountAlt(tbb::enumerable_thread_specific<TraceWrapper> &tls) : myTLS(tls) {
+//        qDebug() << "Creating event count";
+    }
+    EventCountAlt(const EventCountAlt &other) : EventCountAlt(other.myTLS) {
+//        qDebug() << "Copying event count";
+    }
+    int operator()(const struct map_params params) {
+//         qDebug() << "Calling event count";
+        TraceWrapper &wrapper = myTLS.local();
+        bt_context *myCtx = wrapper.ctx;
+        int sum = 0;
+        bt_ctf_event *ctf_event;
+
+        struct bt_ctf_iter *iter = bt_ctf_iter_create(myCtx, &params.begin_pos, &params.end_pos);
+
+        while((ctf_event = bt_ctf_iter_read_event(iter))) {
+            sum++;
+            bt_iter_next(bt_ctf_get_iter(iter));
+        }
+
+        qDebug() << "Counted" << sum << "events";
+
+        bt_ctf_iter_destroy(iter);
+        return sum;
+    }
+};
 
 ParallelTest::ParallelTest()
 {
@@ -71,8 +187,10 @@ void ParallelTest::initTestCase()
 //                                     << "babeltrace" << "tests" << "ctf-traces"
 //                                     << "succeed" << "lttng-modules-2.0-pre5";
     QStringList path = QStringList() << "/home" << "fabien" << "lttng-traces"
-                                        << "sinoscope-20140708-150630";
-    traceDir.setPath(path.join(QDir::separator()) + "/kernel");
+                                        << "unbalanced-20140916-143242";
+//                                        << "sinoscope-20140708-150630";
+//                                        << "live-test-20140805-153033";
+    traceDir.setPath(path.join(QDir::separator()) + "/kernel_per_stream/channel0_0.d");
     perStreamTraceDir.setPath(path.join(QDir::separator()) + "/kernel_per_stream");
 }
 
@@ -89,24 +207,43 @@ void ParallelTest::benchmarkSerial()
     count = countSerial();
     int milliseconds = timer.elapsed();
     qDebug() << "Event count : " << count;
-    qDebug() << "Elapsed : " << milliseconds << "ms";
+    qDebug() << "Serial Elapsed : " << milliseconds << "ms";
 }
 
 void ParallelTest::benchmarkParallel()
 {
 //    return;
+
+//    volatile int count;
+//    QTime timer;
+//    for (int i = 1; i < 10; i++) {
+//        MAX_PACKET_SIZE = i*PACKET_SIZE;
+//        qDebug() << "With packet size" << MAX_PACKET_SIZE;
+//        timer.restart();
+//        count = countParallelMapReduceBalanced();
+//        int milliseconds = timer.elapsed();
+//        qDebug() << "Event count : " << count;
+//        qDebug() << "Elapsed : " << milliseconds << "ms";
+//    }
+
     volatile int count;
     QTime timer;
     timer.start();
-    count = countParallelMapReduce();
+    count = countParallelMapReduceBalanced();
     int milliseconds = timer.elapsed();
     qDebug() << "Event count : " << count;
-    qDebug() << "Elapsed : " << milliseconds << "ms";
+    qDebug() << "Balanced Elapsed : " << milliseconds << "ms";
+
+    timer.restart();
+    count = countParallelMapReduce(NUM_THREADS);
+    milliseconds = timer.elapsed();
+    qDebug() << "Event count : " << count;
+    qDebug() << "Unbalanced Elapsed : " << milliseconds << "ms";
 }
 
 void ParallelTest::benchmarkParallelPerStream()
 {
-//    return;
+    return;
     volatile int count;
     QTime timer;
     timer.start();
@@ -118,7 +255,7 @@ void ParallelTest::benchmarkParallelPerStream()
 
 void ParallelTest::benchmarkTbb()
 {
-//    return;
+    return;
     volatile int count;
     QTime timer;
     uint64_t minChunks[] = { /*1000000000, 2000000000, 4000000000,*/ 8000000000 };
@@ -165,13 +302,13 @@ int ParallelTest::countSerial()
     params.end_pos.type = BT_SEEK_LAST;
 
     int milliseconds = timer.elapsed();
-    qDebug() << "Elapsed for init : " << milliseconds << "ms";
+//    qDebug() << "Elapsed for init : " << milliseconds << "ms";
     timer.restart();
 
     count = doCount(params);
 
     milliseconds = timer.elapsed();
-    qDebug() << "Elapsed for map reduce : " << milliseconds << "ms";
+//    qDebug() << "Elapsed for serial : " << milliseconds << "ms";
 
 //    bt_context_put(ctx);
     return count;
@@ -315,10 +452,11 @@ int ParallelTest::countParallelMulti()
     return acc;
 }
 */
-int ParallelTest::countParallelMapReduce()
+int ParallelTest::countParallelMapReduce(int splits)
 {
 //    QTime timer;
 //    timer.start();
+    int NUM_THREADS = splits;
     struct bt_iter_pos positions[NUM_THREADS+1];
     QList< struct map_params > paramsList;
     struct bt_iter_pos end_pos;
@@ -371,7 +509,10 @@ int ParallelTest::countParallelMapReduce()
 //    qDebug() << "Elapsed for init : " << milliseconds << "ms";
 //    timer.restart();
 
-    QFuture<int> countFuture = QtConcurrent::mappedReduced(paramsList, doCount, doSum);
+    tbb::enumerable_thread_specific<TraceWrapper> tls([path]{ return TraceWrapper(path); });
+    EventCountAlt ec(tls);
+
+    QFuture<int> countFuture = QtConcurrent::mappedReduced(paramsList, ec, doSum);
 
     int count = countFuture.result();
 
@@ -385,87 +526,7 @@ int ParallelTest::countParallelMapReduce()
     return count;
 }
 
-int ParallelTest::countParallelMapReduceBalanced()
-{
 
-}
-
-struct TimestampRange {
-    uint64_t begin;
-    uint64_t end;
-    uint64_t minChunk;
-    bool empty() const { return begin == end; }
-    bool is_divisible() const { return (end - begin) > minChunk; }
-    TimestampRange(uint64_t begin, uint64_t end, uint64_t minChunk) :
-        begin(begin), end(end), minChunk(minChunk) {}
-    TimestampRange(TimestampRange &r, tbb::split) : minChunk(r.minChunk) {
-        uint64_t m = (r.begin + r.end)/2;
-        this->begin = m;
-        this->end = r.end;
-        r.end = m;
-    }
-};
-
-struct TraceWrapper {
-    bt_context *ctx;
-    TraceWrapper(QString tracePath) {
-//        qDebug() << "Making wrapper";
-        ctx = bt_context_create();
-        int trace_id = bt_context_add_trace(ctx, tracePath.toStdString().c_str(), "ctf", NULL, NULL, NULL);
-        if(trace_id < 0)
-        {
-            qDebug() << "Failed: bt_context_add_trace";
-        }
-    }
-
-    TraceWrapper(TraceWrapper &other) : ctx(other.ctx) {
-//        qDebug() << "Copying wrapper";
-        bt_context_get(ctx);
-    }
-
-    TraceWrapper(TraceWrapper &&other) : ctx(std::move(other.ctx)) {
-//        qDebug() << "Moving wrapper";
-    }
-
-    ~TraceWrapper() {
-//        qDebug() << "Destroying wrapper";
-        bt_context_put(ctx);
-    }
-};
-
-struct EventCount {
-    int mySum;
-    tbb::enumerable_thread_specific<TraceWrapper> &myTLS; // Thread local storage
-    QString myTracePath;
-    EventCount(tbb::enumerable_thread_specific<TraceWrapper> &tls) : mySum(0), myTLS(tls) {}
-    EventCount(EventCount &other, tbb::split) : EventCount(other.myTLS) { }
-    void operator()(const tbb::blocked_range<uint64_t> &r) {
-        uint64_t begin = r.begin();
-        uint64_t end = r.end();
-//        qDebug() << "Calculating range between " << begin << " and " << end;
-        TraceWrapper &wrapper = myTLS.local();
-        bt_context *myCtx = wrapper.ctx;
-        int sum = mySum;
-        bt_iter_pos begin_pos, end_pos;
-        bt_ctf_event *ctf_event;
-
-        begin_pos.type = end_pos.type = BT_SEEK_TIME;
-        begin_pos.u.seek_time = begin;
-        end_pos.u.seek_time = end;
-
-        struct bt_ctf_iter *iter = bt_ctf_iter_create(myCtx, &begin_pos, &end_pos);
-
-        while((ctf_event = bt_ctf_iter_read_event(iter))) {
-            sum++;
-            bt_iter_next(bt_ctf_get_iter(iter));
-        }
-
-        bt_ctf_iter_destroy(iter);
-
-        mySum = sum;
-    }
-    void join (const EventCount &other) { mySum += other.mySum; }
-};
 
 int ParallelTest::countParallelTbb(uint64_t minChunk)
 {
@@ -517,8 +578,6 @@ int ParallelTest::countParallelTbb(uint64_t minChunk)
 
 int ParallelTest::countParallelPerStream()
 {
-    //    QTime timer;
-    //    timer.start();
         QList< struct map_params > paramsList;
 
         QString path = perStreamTraceDir.absolutePath();
@@ -532,22 +591,92 @@ int ParallelTest::countParallelPerStream()
             paramsList << params;
         }
 
-    //    int milliseconds = timer.elapsed();
-    //    qDebug() << "Elapsed for init : " << milliseconds << "ms";
-    //    timer.restart();
-
         QFuture<int> countFuture = QtConcurrent::mappedReduced(paramsList, doCount, doSum);
 
+
         int count = countFuture.result();
-
-    //    milliseconds = timer.elapsed();
-    //    qDebug() << "Elapsed for map reduce : " << milliseconds << "ms";
-
-    //    for (int i = 0; i < NUM_THREADS; i++)
-    //    {
-    //        bt_context_put(ctxs[i]);
-    //    }
         return count;
+}
+
+QVector<bt_iter_pos> positions;
+
+int ParallelTest::countParallelMapReduceBalanced()
+{
+    QList< struct map_params > paramsList;
+    positions.clear();
+
+    QString path = perStreamTraceDir.absolutePath() + "/channel0_0.d";
+
+    // open a trace
+    struct bt_context *ctx = bt_context_create();
+    int trace_id = bt_context_add_trace(ctx, path.toStdString().c_str(), "ctf", seek, NULL, NULL);
+    if(trace_id < 0)
+    {
+        qDebug() << "Failed: bt_context_add_trace";
+        return 0;
+    }
+
+    bt_ctf_iter *iter = bt_ctf_iter_create(ctx, NULL, NULL);
+    bt_ctf_iter_read_event(iter);
+
+    bt_ctf_iter_destroy(iter);
+    bt_context_put(ctx);
+
+    for (int i = 0; i < positions.size() - 1; i++)
+    {
+        struct map_params params;
+        params.tracePath = path;
+        params.begin_pos = positions[i];
+        params.end_pos = positions[i+1];
+        params.end_pos.u.seek_time -= 1;
+        paramsList << params;
+    }
+
+    tbb::enumerable_thread_specific<TraceWrapper> tls([path]{ return TraceWrapper(path); });
+    EventCountAlt ec(tls);
+
+    QFuture<int> countFuture = QtConcurrent::mappedReduced(paramsList, ec, doSum);
+
+    int count = countFuture.result();
+    return count;
+}
+
+void seek(bt_stream_pos *pos, size_t index, int whence)
+{
+    struct ctf_stream_pos* p = ctf_pos(pos);
+    struct packet_index *idx;
+    unsigned int num_packets = p->packet_index->len;
+
+    uint64_t size = 0;
+    for (unsigned int i = 0; i < num_packets; i++) {
+        idx = &g_array_index(p->packet_index, struct packet_index, i);
+        size += idx->content_size;
+    }
+
+    uint64_t MAX_PACKET_SIZE = size/num_packets;
+
+    qDebug() << "Num packets:" << num_packets;
+
+    uint64_t acc = 0;
+    bt_iter_pos iter_pos;
+    iter_pos.type = BT_SEEK_BEGIN;
+    positions << iter_pos;
+
+    iter_pos.type = BT_SEEK_TIME;
+    // NOTE: disregard last packet, since the BT_SEEK_LAST will take care of it
+    for (unsigned int i = 0; i < num_packets - 1; i++) {
+        idx = &g_array_index(p->packet_index, struct packet_index, i);
+        acc += idx->content_size;
+        if (acc >= MAX_PACKET_SIZE) {
+            acc = 0;
+            iter_pos.u.seek_time = idx->ts_real.timestamp_end;
+            positions << iter_pos;
+        }
+    }
+    iter_pos.type = BT_SEEK_LAST;
+    positions << iter_pos;
+    qDebug() << "Using " << positions.size() - 1 << " chunks";
+    ctf_packet_seek(pos, index, whence);
 }
 
 int doCount(struct map_params params)
@@ -575,6 +704,8 @@ int doCount(struct map_params params)
     bt_ctf_iter_destroy(iter);
 
     bt_context_put(ctx);
+
+//    qDebug() << "Counted" << count << "events";
 
     return count;
 }

@@ -121,7 +121,7 @@ error:
 
 void ParallelCpuTest::benchmarkSerialCpu()
 {
-    return;
+//    return;
     QTime timer;
     timer.start();
     struct bt_context *ctx;
@@ -157,11 +157,11 @@ void ParallelCpuTest::benchmarkSerialCpu()
     QHash<int, Process>& tids = sched.getTids();
     uint64_t start = sched.getStart();
     uint64_t end = sched.getEnd();
+    uint64_t total = end - start;
 
     QMutableVectorIterator<Cpu> cpu_iter(cpus);
     while (cpu_iter.hasNext()) {
         Cpu &cpu = cpu_iter.next();
-        uint64_t total = end - start;
         if (cpu.task_start != 0) {
             cpu.cpu_ns += end - cpu.task_start;
         }
@@ -172,14 +172,45 @@ void ParallelCpuTest::benchmarkSerialCpu()
         }
     }
 
+    QTextStream qout(stdout);
+
+    qout << "Per-TID CPU Usage" << endl;
+    qout << QString('#').repeated(80) << endl;
+
+    QList<Process> vals = tids.values();
+    sort(vals.begin(), vals.end(), [](const Process &a, const Process &b) -> bool {
+        return a.cpu_ns > b.cpu_ns;
+    });
+
+    int limit = 10;
+    int count = 0;
+    QListIterator<Process> sortedTid(vals);
+    while (sortedTid.hasNext()) {
+        const Process &tid = sortedTid.next();
+        double tid_pc = ((double)(tid.cpu_ns * 100))/((double)total);
+        qout << QString("%1%").arg(tid_pc, 0, 'f', 2) << "\t"
+                  << tid.comm << " ("
+                  << tid.tid << ")"
+                  << endl;
+        count++;
+        if (count >= limit) {
+            break;
+        }
+    }
+
+    qout << "Per-CPU Usage" << endl;
+    qout << QString('#').repeated(80) << endl;
+
     sort(cpus.begin(), cpus.end(), [](const Cpu &a, const Cpu &b) -> bool {
         return a.cpu_ns > b.cpu_ns;
     });
 
-    QVectorIterator<Cpu> sorted(cpus);
-    while(sorted.hasNext()) {
-        const Cpu &cpu = sorted.next();
-        printf("CPU %d: %0.02f%%\n", cpu.id, cpu.cpu_pc);
+    QVectorIterator<Cpu> sortedCpu(cpus);
+    while (sortedCpu.hasNext()) {
+        const Cpu &cpu = sortedCpu.next();
+        qout << QString("%1%").arg(cpu.cpu_pc, 0, 'f', 2) << "\t"
+                            << "CPU " << cpu.id
+                            << endl;
     }
 
     bt_ctf_iter_destroy(iter);
@@ -214,17 +245,59 @@ void ParallelCpuTest::benchmarkParallelCpu()
 
         QVector<Cpu>& cpus = sched.getCpus();
         QHash<int, Process>& tids = sched.getTids();
+        uint64_t total = sched.getEnd() - sched.getStart();
+
+//        sort(cpus.begin(), cpus.end(), [](const Cpu &a, const Cpu &b) -> bool {
+//            return a.cpu_ns > b.cpu_ns;
+//        });
+
+//        QVectorIterator<Cpu> sorted(cpus);
+//        while(sorted.hasNext()) {
+//            const Cpu &cpu = sorted.next();
+//            double cpu_pc = ((double)(cpu.cpu_ns * 100))/((double)total);
+//            printf("CPU %d: %0.02f%%\n", cpu.id, cpu_pc);
+//        }
+
+        QTextStream qout(stdout);
+
+        qout << "Per-TID CPU Usage" << endl;
+        qout << QString('#').repeated(80) << endl;
+
+        QList<Process> vals = tids.values();
+        sort(vals.begin(), vals.end(), [](const Process &a, const Process &b) -> bool {
+            return a.cpu_ns > b.cpu_ns;
+        });
+
+        int limit = 10;
+        int count = 0;
+        QListIterator<Process> sortedTid(vals);
+        while (sortedTid.hasNext()) {
+            const Process &tid = sortedTid.next();
+            double tid_pc = ((double)(tid.cpu_ns * 100))/((double)total);
+            qout << QString("%1%").arg(tid_pc, 0, 'f', 2) << "\t"
+                      << tid.comm << " ("
+                      << tid.tid << ")"
+                      << endl;
+            count++;
+            if (count >= limit) {
+                break;
+            }
+        }
+
+        qout << "Per-CPU Usage" << endl;
+        qout << QString('#').repeated(80) << endl;
 
         sort(cpus.begin(), cpus.end(), [](const Cpu &a, const Cpu &b) -> bool {
             return a.cpu_ns > b.cpu_ns;
         });
 
-        QVectorIterator<Cpu> sorted(cpus);
-        while(sorted.hasNext()) {
-            const Cpu &cpu = sorted.next();
-            uint64_t total = sched.getEnd() - sched.getStart();
+        QVectorIterator<Cpu> sortedCpu(cpus);
+        while (sortedCpu.hasNext()) {
+            const Cpu &cpu = sortedCpu.next();
             double cpu_pc = ((double)(cpu.cpu_ns * 100))/((double)total);
-            printf("CPU %d: %0.02f%%\n", cpu.id, cpu_pc);
+            qout << QString("%1%").arg(cpu_pc, 0, 'f', 2) << "\t"
+                                << "CPU " << cpu.id
+                                << endl;
         }
         int elapsed = timer.elapsed();
         qDebug() << "Elapsed for parallel : " << elapsed << "ms.";
@@ -322,6 +395,20 @@ void doReduce(Sched &final, const Sched& intermediate)
         }
         if (!found) {
             totalCpuIter.insert(partCpu);
+        }
+    }
+
+    // Merge TIDs
+    QHashIterator<int, Process> partTidsIter(partTids);
+    while (partTidsIter.hasNext()) {
+        partTidsIter.next();
+        const int &tid = partTidsIter.key();
+        const Process &partTid = partTidsIter.value();
+        if (totalTids.contains(tid)) {
+            Process &totalTid = totalTids[tid];
+            totalTid.cpu_ns += partTid.cpu_ns;
+        } else {
+            totalTids[tid] = partTid;
         }
     }
 }

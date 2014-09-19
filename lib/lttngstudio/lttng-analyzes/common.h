@@ -1,6 +1,7 @@
 #ifndef COMMON_H
 #define COMMON_H
 
+#include <QString>
 #include <cstdint>
 #include <babeltrace/ctf/events.h>
 
@@ -10,9 +11,9 @@ struct Process
     int pid;
     int tid;
     uint64_t cpu_ns;
-    char *comm;
+    QString comm;
     uint64_t last_sched;
-    Process() : pid(-1), tid(-1), cpu_ns(0), comm(NULL), last_sched(0) {}
+    Process() : pid(-1), tid(-1), cpu_ns(0), comm(), last_sched(0) {}
 };
 
 struct Cpu
