@@ -247,8 +247,8 @@ void ParallelTest::initTestCase()
 //                                     << "babeltrace" << "tests" << "ctf-traces"
 //                                     << "succeed" << "lttng-modules-2.0-pre5";
     QStringList path = QStringList() << "/home" << "fabien" << "lttng-traces"
-//                                        << "unbalanced-20140916-143242";
-                                        << "test-20140619-171512";
+                                        << "unbalanced-20140916-143242";
+//                                        << "test-20140619-171512";
 //                                        << "sinoscope-20140708-150630";
 //                                        << "live-test-20140805-153033";
     traceDir.setPath(path.join(QDir::separator()) + "/kernel_per_stream/channel0_0.d");
@@ -497,7 +497,7 @@ int ParallelTest::countParallelMapReduceBalanced()
         params.tracePath = path;
         params.begin_pos = positions[i];
         params.end_pos = positions[i+1];
-        params.end_pos.u.seek_time -= 1; // Fixes timestamp overlap issues
+        params.begin_pos.u.seek_time += 1; // Fixes timestamp overlap issues
         paramsList << params;
     }
 
@@ -544,13 +544,13 @@ void seek(bt_stream_pos *pos, size_t index, int whence)
     // NOTE: disregard last packet, since the BT_SEEK_LAST will take care of it
     for (unsigned int i = 0; i < num_packets - 1; i++) {
         idx = &g_array_index(p->packet_index, struct packet_index, i);
-        acc += idx->content_size;
         if (acc >= maxPacketSize) {
             // Our chunk is big enough, add the timestamp to our positions
             acc = 0;
             iter_pos.u.seek_time = idx->ts_real.timestamp_end;
             positions << iter_pos;
         }
+        acc += idx->content_size;
     }
     // Add end of trace to positions
     iter_pos.type = BT_SEEK_LAST;
