@@ -27,6 +27,48 @@ struct Cpu
     Cpu() : Cpu(0) {}
 };
 
+/*!
+ * \brief The TraceWrapper class is used to lazily initialize
+ * contexts and add traces when needed.
+ */
+class TraceWrapper {
+private:
+    bt_context *ctx;
+    QString tracePath;
+
+public:
+
+    TraceWrapper(QString tracePath) : ctx(NULL), tracePath(tracePath) { }
+
+    // Copying isn't allowed
+    TraceWrapper(const TraceWrapper &other) = delete;
+
+    // Moving is ok though (C++11)
+    TraceWrapper(TraceWrapper &&other) : ctx(std::move(other.ctx)), tracePath(std::move(other.tracePath)) { }
+
+    ~TraceWrapper() {
+        if (ctx) {
+            bt_context_put(ctx);
+        }
+    }
+
+    /*!
+     * \brief Initialize the context if not initialized
+     * and return it.
+     * \return The context.
+     */
+    bt_context* getContext() {
+        if (!ctx) {
+            ctx = bt_context_create();
+            int trace_id = bt_context_add_trace(ctx, tracePath.toStdString().c_str(), "ctf", NULL, NULL, NULL);
+            if(trace_id < 0) {
+//                qDebug() << "Failed: bt_context_add_trace";
+            }
+        }
+        return ctx;
+    }
+};
+
 uint64_t get_cpu_id(const struct bt_ctf_event *event)
 {
     const struct bt_definition *scope;

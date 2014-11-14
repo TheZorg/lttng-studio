@@ -4,4 +4,6 @@ basic \
     babeltrace \
     unwind \
     parallel \
-    parallel-cpu
+    parallel-cpu \
+    parallel-state-machine \
+    parallel-io

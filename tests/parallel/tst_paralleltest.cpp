@@ -12,6 +12,8 @@
 
 #include <stdint.h>
 
+#include "lttng-analyzes/common.h"
+
 extern "C" {
 #include <babeltrace/babeltrace.h>
 #include <babeltrace/format.h>
@@ -92,7 +94,7 @@ private:
  * \brief The map_params struct is used to pass
  * arguments to the map-reduce functions.
  */
-struct map_params {
+struct MapParams {
     QString tracePath;
     struct bt_iter_pos begin_pos;
     struct bt_iter_pos end_pos;
@@ -111,7 +113,7 @@ void seek(bt_stream_pos *pos, size_t index, int whence);
  * \param params Parameters used to identify trace, time range, etc.
  * \return Number of events.
  */
-int doCount(struct map_params params);
+int doFirstPassMap(struct MapParams params);
 
 /*!
  * \brief Event summing routine. Used by mappedReduced.
@@ -119,46 +121,6 @@ int doCount(struct map_params params);
  * \param intermediate Count to add to accumulator.
  */
 void doSum(int &finalResult, const int &intermediate);
-
-/*!
- * \brief The TraceWrapper class is used to lazily initialize
- * contexts and add traces when needed.
- */
-class TraceWrapper {
-private:
-    bt_context *ctx;
-    QString tracePath;
-
-public:
-
-    TraceWrapper(QString tracePath) : ctx(NULL), tracePath(tracePath) { }
-
-    // Copying isn't allowed
-    TraceWrapper(const TraceWrapper &other) = delete;
-
-    // Moving is ok though (C++11)
-    TraceWrapper(TraceWrapper &&other) : ctx(std::move(other.ctx)) { }
-
-    ~TraceWrapper() {
-        bt_context_put(ctx);
-    }
-
-    /*!
-     * \brief Initialize the context if not initialized
-     * and return it.
-     * \return The context.
-     */
-    bt_context* getContext() {
-        if (!ctx) {
-            ctx = bt_context_create();
-            int trace_id = bt_context_add_trace(ctx, tracePath.toStdString().c_str(), "ctf", NULL, NULL, NULL);
-            if(trace_id < 0) {
-                qDebug() << "Failed: bt_context_add_trace";
-            }
-        }
-        return ctx;
-    }
-};
 
 /*!
  * \brief The EventCountTbb struct is the functor used
@@ -192,7 +154,7 @@ struct EventCountTbb {
             bt_iter_next(bt_ctf_get_iter(iter));
         }
 
-        qDebug() << "Counted" << sum - mySum << "events";
+//        qDebug() << "Counted" << sum - mySum << "events";
 
         bt_ctf_iter_destroy(iter);
 
@@ -211,16 +173,16 @@ struct EventCountTbb {
  * It is necessary to reuse the functor so that context creation
  * costs are amortized with trace size.
  */
-struct EventCount
+struct MapPass
 {
     typedef int result_type;
     tbb::enumerable_thread_specific<TraceWrapper> &myTLS; // Thread local storage
 
-    EventCount(tbb::enumerable_thread_specific<TraceWrapper> &tls) : myTLS(tls) { }
+    MapPass(tbb::enumerable_thread_specific<TraceWrapper> &tls) : myTLS(tls) { }
 
-    EventCount(const EventCount &other) : EventCount(other.myTLS) { }
+    MapPass(const MapPass &other) : MapPass(other.myTLS) { }
 
-    int operator()(const struct map_params params) {
+    int operator()(const struct MapParams params) {
         TraceWrapper &wrapper = myTLS.local();
         bt_context *myCtx = wrapper.getContext();
         int sum = 0;
@@ -233,7 +195,7 @@ struct EventCount
             bt_iter_next(bt_ctf_get_iter(iter));
         }
 
-        qDebug() << "Counted" << sum << "events";
+//        qDebug() << "Counted" << sum << "events";
 
         bt_ctf_iter_destroy(iter);
         return sum;
@@ -247,11 +209,11 @@ void ParallelTest::initTestCase()
 //                                     << "babeltrace" << "tests" << "ctf-traces"
 //                                     << "succeed" << "lttng-modules-2.0-pre5";
     QStringList path = QStringList() << "/home" << "fabien" << "lttng-traces"
-                                        << "unbalanced-20140916-143242";
+//                                        << "unbalanced-20140916-143242";
 //                                        << "test-20140619-171512";
-//                                        << "sinoscope-20140708-150630";
+                                        << "redis_tid-20141104-143623";
 //                                        << "live-test-20140805-153033";
-    traceDir.setPath(path.join(QDir::separator()) + "/kernel_per_stream/channel0_0.d");
+    traceDir.setPath(path.join(QDir::separator()) + "/kernel");
     perStreamTraceDir.setPath(path.join(QDir::separator()) + "/kernel_per_stream");
 }
 
@@ -270,11 +232,13 @@ void ParallelTest::benchmarkParallelUnbalanced()
 {
     volatile int count;
     QTime timer;
-    timer.start();
-    count = countParallelMapReduce(DEFAULT_SPLITS);
-    int milliseconds = timer.elapsed();
-    qDebug() << "Event count : " << count;
-    qDebug() << "Unbalanced Elapsed : " << milliseconds << "ms";
+    for (int i = DEFAULT_SPLITS; i > 0; i--) {
+        timer.restart();
+        count = countParallelMapReduce(i);
+        int milliseconds = timer.elapsed();
+        qDebug() << "Event count : " << count;
+        qDebug() << "Unbalanced Elapsed : " << milliseconds << "ms";
+    }
 }
 
 void ParallelTest::benchmarkParallelPerStream()
@@ -315,12 +279,12 @@ int ParallelTest::countSerial()
     int count = 0;
     QString path = traceDir.absolutePath();
 
-    struct map_params params;
+    struct MapParams params;
     params.tracePath = path;
     params.begin_pos.type = BT_SEEK_BEGIN;
     params.end_pos.type = BT_SEEK_LAST;
 
-    count = doCount(params);
+    count = doFirstPassMap(params);
 
     return count;
 }
@@ -328,7 +292,7 @@ int ParallelTest::countSerial()
 int ParallelTest::countParallelMapReduce(int splits)
 {
     struct bt_iter_pos positions[splits+1];
-    QList< struct map_params > paramsList;
+    QList< struct MapParams > paramsList;
     struct bt_iter_pos end_pos;
 
     QString path = traceDir.absolutePath();
@@ -371,7 +335,7 @@ int ParallelTest::countParallelMapReduce(int splits)
     // Build the params list
     for (int i = 0; i < splits; i++)
     {
-        struct map_params params;
+        struct MapParams params;
         params.tracePath = path;
         params.begin_pos = positions[i];
         params.end_pos = positions[i+1];
@@ -380,7 +344,7 @@ int ParallelTest::countParallelMapReduce(int splits)
 
     // Instantiate functor and thread local storage for trace wrappers
     tbb::enumerable_thread_specific<TraceWrapper> tls([path]{ return TraceWrapper(path); });
-    EventCount ec(tls);
+    MapPass ec(tls);
 
     // Launch map reduce
     QFuture<int> countFuture = QtConcurrent::mappedReduced(paramsList, ec, doSum);
@@ -435,7 +399,7 @@ int ParallelTest::countParallelTbb(uint64_t minChunk)
 
 int ParallelTest::countParallelPerStream()
 {
-    QList< struct map_params > paramsList;
+    QList< struct MapParams > paramsList;
 
     // Retrieve all the split trace directories
     QFileInfoList fileInfoList = perStreamTraceDir.entryInfoList(QStringList() << "*.d", QDir::Dirs);
@@ -444,7 +408,7 @@ int ParallelTest::countParallelPerStream()
     for (int i = 0; i < fileInfoList.size(); i++)
     {
         QFileInfo fileInfo = fileInfoList.at(i);
-        struct map_params params;
+        struct MapParams params;
         params.tracePath = fileInfo.absoluteFilePath();
         params.begin_pos.type = BT_SEEK_BEGIN;
         params.end_pos.type = BT_SEEK_LAST;
@@ -456,7 +420,7 @@ int ParallelTest::countParallelPerStream()
 //    EventCount ec(tls);
 
     // Launch map reduce
-    QFuture<int> countFuture = QtConcurrent::mappedReduced(paramsList, doCount, doSum);
+    QFuture<int> countFuture = QtConcurrent::mappedReduced(paramsList, doFirstPassMap, doSum);
 
     int count = countFuture.result();
     return count;
@@ -467,7 +431,7 @@ QVector<bt_iter_pos> positions;
 
 int ParallelTest::countParallelMapReduceBalanced()
 {
-    QList< struct map_params > paramsList;
+    QList< struct MapParams > paramsList;
     positions.clear();
 
     // TODO: make it work with multiple streams
@@ -493,7 +457,7 @@ int ParallelTest::countParallelMapReduceBalanced()
     // Build the params list;
     for (int i = 0; i < positions.size() - 1; i++)
     {
-        struct map_params params;
+        struct MapParams params;
         params.tracePath = path;
         params.begin_pos = positions[i];
         params.end_pos = positions[i+1];
@@ -503,7 +467,7 @@ int ParallelTest::countParallelMapReduceBalanced()
 
     // Instantiate functor and thread local storage for trace wrappers
     tbb::enumerable_thread_specific<TraceWrapper> tls([path]{ return TraceWrapper(path); });
-    EventCount ec(tls);
+    MapPass ec(tls);
 
     // Launch map reduce
     QFuture<int> countFuture = QtConcurrent::mappedReduced(paramsList, ec, doSum);
@@ -544,13 +508,13 @@ void seek(bt_stream_pos *pos, size_t index, int whence)
     // NOTE: disregard last packet, since the BT_SEEK_LAST will take care of it
     for (unsigned int i = 0; i < num_packets - 1; i++) {
         idx = &g_array_index(p->packet_index, struct packet_index, i);
+        acc += idx->content_size;
         if (acc >= maxPacketSize) {
             // Our chunk is big enough, add the timestamp to our positions
             acc = 0;
             iter_pos.u.seek_time = idx->ts_real.timestamp_end;
             positions << iter_pos;
         }
-        acc += idx->content_size;
     }
     // Add end of trace to positions
     iter_pos.type = BT_SEEK_LAST;
@@ -561,7 +525,7 @@ void seek(bt_stream_pos *pos, size_t index, int whence)
     ctf_packet_seek(pos, index, whence);
 }
 
-int doCount(struct map_params params)
+int doFirstPassMap(struct MapParams params)
 {
     struct bt_ctf_event *ctf_event;
     int count = 0;
@@ -586,7 +550,7 @@ int doCount(struct map_params params)
     bt_ctf_iter_destroy(iter);
     bt_context_put(ctx);
 
-    qDebug() << "Counted" << count << "events";
+//    qDebug() << "Counted" << count << "events";
 
     return count;
 }

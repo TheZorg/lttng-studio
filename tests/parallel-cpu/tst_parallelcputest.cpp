@@ -46,7 +46,7 @@ private:
     Sched sched;
 };
 
-struct map_params {
+struct MapParams {
     QString tracePath;
     struct bt_iter_pos begin_pos;
     struct bt_iter_pos end_pos;
@@ -60,7 +60,7 @@ ParallelCpuTest::ParallelCpuTest() : sched()
 void ParallelCpuTest::initTestCase()
 {
     QStringList path = QStringList() << "/home" << "fabien" << "lttng-traces"
-                                        << "sinoscope-20140708-150630";
+                                        << "sched-20141111-201437";
     traceDir.setPath(path.join(QDir::separator()) + "/kernel");
     perStreamTraceDir.setPath(path.join(QDir::separator()) + "/kernel_per_stream");
 }
@@ -219,27 +219,29 @@ void ParallelCpuTest::benchmarkSerialCpu()
     qDebug() << "Elapsed for serial : " << elapsed << "ms.";
 }
 
-Sched doCount(const map_params &params);
-void doReduce(Sched &final, const Sched& intermediate);
+Sched doFirstPassMap(const MapParams &params);
+void doFirstPassReduce(Sched &final, const Sched& intermediate);
 
 void ParallelCpuTest::benchmarkParallelCpu()
 {
+    for (int threads = NUM_THREADS; threads > 0; threads--) {
+        QThreadPool::globalInstance()->setMaxThreadCount(threads);
         QTime timer;
         timer.start();
-        QList< struct map_params > paramsList;
+        QList< struct MapParams > paramsList;
 
         QString path = perStreamTraceDir.absolutePath();
 
         for (int i = 0; i < NUM_THREADS; i++)
         {
-            struct map_params params;
+            struct MapParams params;
             params.tracePath = path + "/channel0_" + QString::number(i) + ".d";
             params.begin_pos.type = BT_SEEK_BEGIN;
             params.end_pos.type = BT_SEEK_LAST;
             paramsList << params;
         }
 
-        QFuture<Sched> schedFuture = QtConcurrent::mappedReduced(paramsList, doCount, doReduce);
+        QFuture<Sched> schedFuture = QtConcurrent::mappedReduced(paramsList, doFirstPassMap, doFirstPassReduce);
 
         Sched sched = schedFuture.result();
 
@@ -300,10 +302,11 @@ void ParallelCpuTest::benchmarkParallelCpu()
                                 << endl;
         }
         int elapsed = timer.elapsed();
-        qDebug() << "Elapsed for parallel : " << elapsed << "ms.";
+        qDebug() << "Elapsed for parallel" << threads << ": " << elapsed << "ms.";
+    }
 }
 
-Sched doCount(const map_params &params)
+Sched doFirstPassMap(const MapParams &params)
 {
     struct bt_context *ctx;
     struct bt_ctf_iter *iter;
@@ -361,7 +364,7 @@ Sched doCount(const map_params &params)
     return sched;
 }
 
-void doReduce(Sched &final, const Sched& intermediate)
+void doFirstPassReduce(Sched &final, const Sched& intermediate)
 {
     const QVector<Cpu> &partCpus = intermediate.getCpus();
     const QHash<int, Process> &partTids = intermediate.getTids();

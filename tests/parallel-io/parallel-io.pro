@@ -1,6 +1,6 @@
 #-------------------------------------------------
 #
-# Project created by QtCreator 2014-08-12T12:22:26
+# Project created by QtCreator 2014-10-31T13:20:56
 #
 #-------------------------------------------------
 
@@ -10,23 +10,20 @@ QT       += testlib concurrent
 
 QT       -= gui
 
-TARGET = tst_paralleltest
+TARGET = tst_paralleliotest
 CONFIG   += console
 CONFIG   -= app_bundle
 
 TEMPLATE = app
 
 
-SOURCES += \
-    tst_paralleltest.cpp
+SOURCES += tst_paralleliotest.cpp
 DEFINES += SRCDIR=\\\"$$PWD/\\\"
 
-#LIBS += -ltbb
+CONFIG += c++11
 
-#CONFIG += c++11
+QMAKE_CXXFLAGS += -g
 
-CONFIG += debug
-
-QMAKE_CXXFLAGS += -std=gnu++0x -O0
+INCLUDEPATH += /usr/include/glib-2.0/ /usr/lib/x86_64-linux-gnu/glib-2.0/include/
 
 include(../post.pri)
